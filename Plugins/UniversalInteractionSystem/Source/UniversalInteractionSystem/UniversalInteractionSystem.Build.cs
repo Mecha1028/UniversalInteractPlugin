@@ -34,8 +34,8 @@ public class UniversalInteractionSystem : ModuleRules
 				"ContentBrowser",
 				"BlueprintGraph",
 				"DesktopPlatform",
-				"DesktopWidgets"
-			});
+                "DesktopWidgets"
+            });
 
 
         PrivateDependencyModuleNames.AddRange(

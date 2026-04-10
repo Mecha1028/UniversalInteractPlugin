@@ -14,50 +14,304 @@
 #include "Widgets/Input/SEditableTextBox.h"
 #include "DesktopPlatformModule.h"
 #include "Framework/Application/SlateApplication.h"
-#include "Widgets/Input/SDirectoryPicker.h"
+#include "IContentBrowserSingleton.h"
+#include "ContentBrowserModule.h"
 
+#include "AssetToolsModule.h"
+#include "Factories/BlueprintFactory.h"
+#include "Engine/Blueprint.h"
+#include "Engine/SimpleConstructionScript.h"
+#include "Engine/SCS_Node.h"
+#include "Components/StaticMeshComponent.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "EdGraph/EdGraph.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "UObject/SavePackage.h"
+#include "K2Node_Event.h"
+
+#include "Framework/Notifications/NotificationManager.h"
+#include "Widgets/Notifications/SNotificationList.h"
 
 static const FName UniversalInteractionSystemTabName("UniversalInteractionSystem");
 
 #define LOCTEXT_NAMESPACE "FUniversalInteractionSystemModule"
 
+// Helper function to create a Content Browser folder picker widget
+TSharedRef<SWidget> CreateContentBrowserFolderPicker(TSharedRef<FString> OutputFolderPath)
+{
+    FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
+    IContentBrowserSingleton& ContentBrowser = ContentBrowserModule.Get();
+
+    FPathPickerConfig PathPickerConfig;
+    PathPickerConfig.DefaultPath = *OutputFolderPath;
+    PathPickerConfig.OnPathSelected = FOnPathSelected::CreateLambda([OutputFolderPath](const FString& FolderPath)
+        {
+            *OutputFolderPath = FolderPath;
+            UE_LOG(LogTemp, Log, TEXT("Selected Content Folder: %s"), *FolderPath);
+        });
+
+    return ContentBrowser.CreatePathPicker(PathPickerConfig);
+}
+
+// Helper: Generate the final Blueprint
+void GenerateInteractableBlueprint(
+    const FString& AssetName,
+    const FString& PackagePath,
+    UStaticMesh* SelectedMesh,
+    bool bPreInteract,
+    bool bReceiveInteract,
+    bool bPostInteract)
+{
+    // Helper lambda for notifications
+    auto ShowNotification = [](const FString& Message, bool bSuccess = true)
+        {
+            FNotificationInfo Info(FText::FromString(Message));
+            Info.ExpireDuration = 5.0f;
+            Info.bUseSuccessFailIcons = true;
+            TSharedPtr<SNotificationItem> NotificationItem = FSlateNotificationManager::Get().AddNotification(Info);
+            NotificationItem->SetCompletionState(bSuccess ? SNotificationItem::CS_Success : SNotificationItem::CS_Fail);
+        };
+
+    UE_LOG(LogTemp, Log, TEXT("=== Starting Blueprint Generation ==="));
+    UE_LOG(LogTemp, Log, TEXT("AssetName: %s"), *AssetName);
+    UE_LOG(LogTemp, Log, TEXT("PackagePath: %s"), *PackagePath);
+    UE_LOG(LogTemp, Log, TEXT("Mesh: %s"), SelectedMesh ? *SelectedMesh->GetName() : TEXT("None"));
+
+    // ------------------------------------------------------------------------
+    // 1. Load base Blueprint using the Asset Registry (most reliable method)
+    // ------------------------------------------------------------------------
+    FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+    IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+
+    TArray<FAssetData> AssetList;
+    AssetRegistry.GetAssetsByPath(FName("/UniversalInteractionSystem"), AssetList, true);
+
+    UBlueprint* BaseBP = nullptr;
+    for (const FAssetData& Asset : AssetList)
+    {
+        if (Asset.AssetName == FName("UIS_BPP_InteractActor"))
+        {
+            BaseBP = Cast<UBlueprint>(Asset.GetAsset());
+            break;
+        }
+    }
+
+    if (!BaseBP)
+    {
+        UE_LOG(LogTemp, Error, TEXT("FAILED: Could not find UIS_BPP_InteractActor in plugin folder"));
+        ShowNotification(TEXT("Base Blueprint 'UIS_BPP_InteractActor' not found in plugin content."), false);
+        return;
+    }
+    UE_LOG(LogTemp, Log, TEXT("Loaded base blueprint: %s"), *BaseBP->GetName());
+
+    UClass* ParentClass = BaseBP->GeneratedClass;
+    if (!ParentClass)
+    {
+        UE_LOG(LogTemp, Error, TEXT("FAILED: Base blueprint has no GeneratedClass"));
+        ShowNotification(TEXT("Base blueprint has no GeneratedClass"), false);
+        return;
+    }
+    UE_LOG(LogTemp, Log, TEXT("Parent class: %s"), *ParentClass->GetName());
+
+    // ------------------------------------------------------------------------
+    // 2. Validate package path
+    // ------------------------------------------------------------------------
+    if (PackagePath.IsEmpty())
+    {
+        UE_LOG(LogTemp, Error, TEXT("FAILED: Output folder path is empty"));
+        ShowNotification(TEXT("Output folder path is empty"), false);
+        return;
+    }
+
+    // ------------------------------------------------------------------------
+    // 3. Create package
+    // ------------------------------------------------------------------------
+    FString FullPackagePath = PackagePath + TEXT("/") + AssetName;
+    UE_LOG(LogTemp, Log, TEXT("Creating package at: %s"), *FullPackagePath);
+    UPackage* Package = CreatePackage(*FullPackagePath);
+    if (!Package)
+    {
+        UE_LOG(LogTemp, Error, TEXT("FAILED: Could not create package"));
+        ShowNotification(TEXT("Failed to create package"), false);
+        return;
+    }
+
+    // ------------------------------------------------------------------------
+    // 4. Create the Blueprint asset using BlueprintFactory
+    // ------------------------------------------------------------------------
+    UBlueprintFactory* Factory = NewObject<UBlueprintFactory>();
+    Factory->ParentClass = ParentClass;
+
+    FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
+    UObject* NewAsset = AssetToolsModule.Get().CreateAsset(AssetName, PackagePath, UBlueprint::StaticClass(), Factory);
+    UBlueprint* NewBP = Cast<UBlueprint>(NewAsset);
+
+    if (!NewBP)
+    {
+        UE_LOG(LogTemp, Error, TEXT("FAILED: CreateAsset returned null or not a Blueprint"));
+        ShowNotification(TEXT("Failed to create Blueprint asset"), false);
+        return;
+    }
+    UE_LOG(LogTemp, Log, TEXT("Blueprint asset created successfully"));
+
+    // ------------------------------------------------------------------------
+    // 5. Add Static Mesh Component to SimpleConstructionScript
+    // ------------------------------------------------------------------------
+    if (SelectedMesh)
+    {
+        UE_LOG(LogTemp, Log, TEXT("Adding StaticMeshComponent with mesh: %s"), *SelectedMesh->GetName());
+        USimpleConstructionScript* SCS = NewBP->SimpleConstructionScript;
+        if (!SCS)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("SimpleConstructionScript is null, creating new one"));
+            NewBP->SimpleConstructionScript = NewObject<USimpleConstructionScript>(NewBP);
+            SCS = NewBP->SimpleConstructionScript;
+        }
+        USCS_Node* NewNode = SCS->CreateNode(UStaticMeshComponent::StaticClass(), FName(TEXT("StaticMeshComponent")));
+        if (NewNode)
+        {
+            SCS->AddNode(NewNode);
+            if (UStaticMeshComponent* SMC = Cast<UStaticMeshComponent>(NewNode->ComponentTemplate))
+            {
+                SMC->SetStaticMesh(SelectedMesh);
+                UE_LOG(LogTemp, Log, TEXT("StaticMeshComponent added and mesh set"));
+            }
+        }
+        else
+        {
+            UE_LOG(LogTemp, Warning, TEXT("Failed to create SCS node for StaticMeshComponent"));
+        }
+    }
+    else
+    {
+        UE_LOG(LogTemp, Log, TEXT("No mesh selected, skipping StaticMeshComponent"));
+    }
+
+    // ------------------------------------------------------------------------
+    // 6. Load interface class using Asset Registry and implement it
+    // ------------------------------------------------------------------------
+    UClass* InterfaceClass = nullptr;
+    for (const FAssetData& Asset : AssetList)
+    {
+        if (Asset.AssetName == FName("UIS_BPI_InteractInterface"))
+        {
+            FString ClassPath = Asset.GetObjectPathString() + TEXT("_C");
+            InterfaceClass = LoadObject<UClass>(nullptr, *ClassPath);
+            break;
+        }
+    }
+
+    if (InterfaceClass)
+    {
+        UE_LOG(LogTemp, Log, TEXT("Loaded interface: %s"), *InterfaceClass->GetName());
+        if (!NewBP->GeneratedClass->ImplementsInterface(InterfaceClass))
+        {
+            FBlueprintEditorUtils::ImplementNewInterface(NewBP, InterfaceClass->GetFName());
+            UE_LOG(LogTemp, Log, TEXT("Interface implemented"));
+        }
+
+        // 7. Add event nodes to the event graph
+        if (bPreInteract || bReceiveInteract || bPostInteract)
+        {
+            UEdGraph* EventGraph = FBlueprintEditorUtils::FindEventGraph(NewBP);
+            if (EventGraph)
+            {
+                UE_LOG(LogTemp, Log, TEXT("Found event graph, adding event nodes..."));
+                int32 NodePosY = 200;
+                auto AddEventNode = [&](const FName& FunctionName)
+                    {
+                        UFunction* Func = InterfaceClass->FindFunctionByName(FunctionName);
+                        if (!Func) return;
+                        UK2Node_Event* EventNode = FKismetEditorUtilities::AddDefaultEventNode(
+                            NewBP, EventGraph, FunctionName, InterfaceClass, NodePosY);
+                        if (EventNode)
+                        {
+                            EventNode->NodePosX = 200;
+                            NodePosY += 150;
+                            UE_LOG(LogTemp, Log, TEXT("  Added event node: %s"), *FunctionName.ToString());
+                        }
+                    };
+                if (bPreInteract) AddEventNode(TEXT("PreInteract"));
+                if (bReceiveInteract) AddEventNode(TEXT("ReceiveInteract"));
+                if (bPostInteract) AddEventNode(TEXT("PostInteract"));
+            }
+            else
+            {
+                UE_LOG(LogTemp, Warning, TEXT("No event graph found"));
+            }
+        }
+    }
+    else
+    {
+        UE_LOG(LogTemp, Error, TEXT("FAILED: Could not find interface UIS_BPI_InteractInterface"));
+        ShowNotification(TEXT("Failed to load interface - event nodes not added"), false);
+    }
+
+    // ------------------------------------------------------------------------
+    // 8. Compile and save the Blueprint
+    // ------------------------------------------------------------------------
+    UE_LOG(LogTemp, Log, TEXT("Compiling blueprint..."));
+    FKismetEditorUtilities::CompileBlueprint(NewBP);
+
+    FAssetRegistryModule::AssetCreated(NewBP);
+    NewBP->MarkPackageDirty();
+
+    FString PackageFilename = FPackageName::LongPackageNameToFilename(FullPackagePath, FPackageName::GetAssetPackageExtension());
+    FSavePackageArgs SaveArgs;
+    SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+    SaveArgs.SaveFlags = SAVE_NoError;
+    bool bSaved = UPackage::SavePackage(Package, NewBP, *PackageFilename, SaveArgs);
+    if (bSaved)
+    {
+        UE_LOG(LogTemp, Log, TEXT("SUCCESS: Blueprint saved to %s"), *FullPackagePath);
+        ShowNotification(FString::Printf(TEXT("Blueprint created: %s"), *AssetName), true);
+    }
+    else
+    {
+        UE_LOG(LogTemp, Error, TEXT("FAILED: Could not save package"));
+        ShowNotification(TEXT("Failed to save Blueprint"), false);
+    }
+}
+
 void FUniversalInteractionSystemModule::StartupModule()
 {
-	// This code will execute after your module is loaded into memory; the exact timing is specified in the .uplugin file per-module
-	
-	FUniversalInteractionSystemStyle::Initialize();
-	FUniversalInteractionSystemStyle::ReloadTextures();
+    // This code will execute after your module is loaded into memory; the exact timing is specified in the .uplugin file per-module
 
-	FUniversalInteractionSystemCommands::Register();
-	
-	PluginCommands = MakeShareable(new FUICommandList);
+    FUniversalInteractionSystemStyle::Initialize();
+    FUniversalInteractionSystemStyle::ReloadTextures();
 
-	PluginCommands->MapAction(
-		FUniversalInteractionSystemCommands::Get().OpenPluginWindow,
-		FExecuteAction::CreateRaw(this, &FUniversalInteractionSystemModule::PluginButtonClicked),
-		FCanExecuteAction());
+    FUniversalInteractionSystemCommands::Register();
 
-	UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FUniversalInteractionSystemModule::RegisterMenus));
-	
-	FGlobalTabmanager::Get()->RegisterNomadTabSpawner(UniversalInteractionSystemTabName, FOnSpawnTab::CreateRaw(this, &FUniversalInteractionSystemModule::OnSpawnPluginTab))
-		.SetDisplayName(LOCTEXT("FUniversalInteractionSystemTabTitle", "UniversalInteractionSystem"))
-		.SetMenuType(ETabSpawnerMenuType::Hidden);
+    PluginCommands = MakeShareable(new FUICommandList);
+
+    PluginCommands->MapAction(
+        FUniversalInteractionSystemCommands::Get().OpenPluginWindow,
+        FExecuteAction::CreateRaw(this, &FUniversalInteractionSystemModule::PluginButtonClicked),
+        FCanExecuteAction());
+
+    UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FUniversalInteractionSystemModule::RegisterMenus));
+
+    FGlobalTabmanager::Get()->RegisterNomadTabSpawner(UniversalInteractionSystemTabName, FOnSpawnTab::CreateRaw(this, &FUniversalInteractionSystemModule::OnSpawnPluginTab))
+        .SetDisplayName(LOCTEXT("FUniversalInteractionSystemTabTitle", "UniversalInteractionSystem"))
+        .SetMenuType(ETabSpawnerMenuType::Hidden);
 }
 
 void FUniversalInteractionSystemModule::ShutdownModule()
 {
-	// This function may be called during shutdown to clean up your module.  For modules that support dynamic reloading,
-	// we call this function before unloading the module.
+    // This function may be called during shutdown to clean up your module.  For modules that support dynamic reloading,
+    // we call this function before unloading the module.
 
-	UToolMenus::UnRegisterStartupCallback(this);
+    UToolMenus::UnRegisterStartupCallback(this);
 
-	UToolMenus::UnregisterOwner(this);
+    UToolMenus::UnregisterOwner(this);
 
-	FUniversalInteractionSystemStyle::Shutdown();
+    FUniversalInteractionSystemStyle::Shutdown();
 
-	FUniversalInteractionSystemCommands::Unregister();
+    FUniversalInteractionSystemCommands::Unregister();
 
-	FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(UniversalInteractionSystemTabName);
+    FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(UniversalInteractionSystemTabName);
 }
 
 TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const FSpawnTabArgs& SpawnTabArgs)
@@ -68,7 +322,7 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
     TSharedRef<bool> bPostInteract = MakeShared<bool>(false);
 
     TSharedRef<FAssetData> SelectedMeshAsset = MakeShared<FAssetData>();
-    TSharedRef<FString> OutputFolderPath = MakeShared<FString>();
+    TSharedRef<FString> OutputFolderPath = MakeShared<FString>(TEXT("/Game"));
     TSharedRef<FString> AssetName = MakeShared<FString>(TEXT("NewInteractable"));
 
     return SNew(SDockTab)
@@ -185,7 +439,7 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
                         ]
                 ]
 
-            // ---- Output Folder Picker (Unreal's SDirectoryPicker) ----
+            // ---- Output Folder Picker (Content Browser Style) ----
             + SVerticalBox::Slot()
                 .AutoHeight()
                 .Padding(5)
@@ -197,16 +451,11 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
                 .AutoHeight()
                 .Padding(5)
                 [
-                    SNew(SDirectoryPicker)
-                        .Folder(OutputFolderPath.Get())
-                        .OnDirectoryChanged_Lambda([OutputFolderPath](const FString& NewPath)
-                            {
-                                *OutputFolderPath = NewPath;
-                            })
+                    CreateContentBrowserFolderPicker(OutputFolderPath)
                 ]
 
-            // ---- Generate Button ----
-            + SVerticalBox::Slot()
+                // ---- Generate Button ----
+                + SVerticalBox::Slot()
                 .AutoHeight()
                 .Padding(10)
                 .HAlign(HAlign_Center)
@@ -215,23 +464,32 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
                         .Text(FText::FromString(TEXT("Generate Blueprint")))
                         .OnClicked_Lambda([SelectedMeshAsset, AssetName, bPreInteract, bReceiveInteract, bPostInteract, OutputFolderPath]() -> FReply
                             {
-                                FString MeshName = SelectedMeshAsset->AssetName.ToString();
                                 FString NameStr = *AssetName;
                                 FString FolderStr = *OutputFolderPath;
                                 bool bPre = *bPreInteract;
                                 bool bReceive = *bReceiveInteract;
                                 bool bPost = *bPostInteract;
 
-                                UE_LOG(LogTemp, Log, TEXT("=== Generate Blueprint ==="));
-                                UE_LOG(LogTemp, Log, TEXT("Mesh: %s"), *MeshName);
-                                UE_LOG(LogTemp, Log, TEXT("Name: %s"), *NameStr);
-                                UE_LOG(LogTemp, Log, TEXT("Folder: %s"), *FolderStr);
-                                UE_LOG(LogTemp, Log, TEXT("PreInteract: %d"), bPre);
-                                UE_LOG(LogTemp, Log, TEXT("ReceiveInteract: %d"), bReceive);
-                                UE_LOG(LogTemp, Log, TEXT("PostInteract: %d"), bPost);
-                                UE_LOG(LogTemp, Log, TEXT("Parent Class: BP_InteractableActor (hardcoded)"));
+                                UE_LOG(LogTemp, Log, TEXT("=== Generate Blueprint Clicked ==="));
+                                UE_LOG(LogTemp, Log, TEXT("Name: %s, Folder: %s"), *NameStr, *FolderStr);
+                                UE_LOG(LogTemp, Log, TEXT("Events - Pre: %d, Receive: %d, Post: %d"), bPre, bReceive, bPost);
 
-                                // TODO: Call Blueprint generation function
+                                // Call generation function
+                                if (SelectedMeshAsset->IsValid() && !NameStr.IsEmpty() && !FolderStr.IsEmpty())
+                                {
+                                    UStaticMesh* Mesh = Cast<UStaticMesh>(SelectedMeshAsset->GetAsset());
+                                    GenerateInteractableBlueprint(NameStr, FolderStr, Mesh, bPre, bReceive, bPost);
+                                }
+                                else
+                                {
+                                    UE_LOG(LogTemp, Warning, TEXT("Missing required fields: Mesh, Name, or Folder."));
+                                    // Show a notification for missing fields
+                                    FNotificationInfo Info(FText::FromString(TEXT("Please fill in all required fields (Mesh, Name, Folder).")));
+                                    Info.ExpireDuration = 3.0f;
+                                    Info.bUseSuccessFailIcons = true;
+                                    TSharedPtr<SNotificationItem> NotificationItem = FSlateNotificationManager::Get().AddNotification(Info);
+                                    NotificationItem->SetCompletionState(SNotificationItem::CS_Fail);
+                                }
 
                                 return FReply::Handled();
                             })
@@ -241,34 +499,34 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
 
 void FUniversalInteractionSystemModule::PluginButtonClicked()
 {
-	FGlobalTabmanager::Get()->TryInvokeTab(UniversalInteractionSystemTabName);
+    FGlobalTabmanager::Get()->TryInvokeTab(UniversalInteractionSystemTabName);
 }
 
 void FUniversalInteractionSystemModule::RegisterMenus()
 {
-	// Owner will be used for cleanup in call to UToolMenus::UnregisterOwner
-	FToolMenuOwnerScoped OwnerScoped(this);
+    // Owner will be used for cleanup in call to UToolMenus::UnregisterOwner
+    FToolMenuOwnerScoped OwnerScoped(this);
 
-	{
-		UToolMenu* Menu = UToolMenus::Get()->ExtendMenu("LevelEditor.MainMenu.Window");
-		{
-			FToolMenuSection& Section = Menu->FindOrAddSection("WindowLayout");
-			Section.AddMenuEntryWithCommandList(FUniversalInteractionSystemCommands::Get().OpenPluginWindow, PluginCommands);
-		}
-	}
+    {
+        UToolMenu* Menu = UToolMenus::Get()->ExtendMenu("LevelEditor.MainMenu.Window");
+        {
+            FToolMenuSection& Section = Menu->FindOrAddSection("WindowLayout");
+            Section.AddMenuEntryWithCommandList(FUniversalInteractionSystemCommands::Get().OpenPluginWindow, PluginCommands);
+        }
+    }
 
-	{
-		UToolMenu* ToolbarMenu = UToolMenus::Get()->ExtendMenu("LevelEditor.LevelEditorToolBar.PlayToolBar");
-		{
-			FToolMenuSection& Section = ToolbarMenu->FindOrAddSection("PluginTools");
-			{
-				FToolMenuEntry& Entry = Section.AddEntry(FToolMenuEntry::InitToolBarButton(FUniversalInteractionSystemCommands::Get().OpenPluginWindow));
-				Entry.SetCommandList(PluginCommands);
-			}
-		}
-	}
+    {
+        UToolMenu* ToolbarMenu = UToolMenus::Get()->ExtendMenu("LevelEditor.LevelEditorToolBar.PlayToolBar");
+        {
+            FToolMenuSection& Section = ToolbarMenu->FindOrAddSection("PluginTools");
+            {
+                FToolMenuEntry& Entry = Section.AddEntry(FToolMenuEntry::InitToolBarButton(FUniversalInteractionSystemCommands::Get().OpenPluginWindow));
+                Entry.SetCommandList(PluginCommands);
+            }
+        }
+    }
 }
 
 #undef LOCTEXT_NAMESPACE
-	
+
 IMPLEMENT_MODULE(FUniversalInteractionSystemModule, UniversalInteractionSystem)
