@@ -330,7 +330,7 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
         [
             SNew(SVerticalBox)
 
-                // ---- Static Mesh Picker ----
+                // ---- Static Mesh Picker (with proper display) ----
                 + SVerticalBox::Slot()
                 .AutoHeight()
                 .Padding(5)
@@ -344,6 +344,11 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
                 [
                     SNew(SObjectPropertyEntryBox)
                         .AllowedClass(UStaticMesh::StaticClass())
+                        .ObjectPath_Lambda([SelectedMeshAsset]() -> FString
+                            {
+                                // Return the object path so the widget shows the asset name and icon
+                                return SelectedMeshAsset->IsValid() ? SelectedMeshAsset->GetObjectPathString() : FString();
+                            })
                         .OnObjectChanged_Lambda([SelectedMeshAsset](const FAssetData& AssetData)
                             {
                                 *SelectedMeshAsset = AssetData;
@@ -454,7 +459,7 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
                     CreateContentBrowserFolderPicker(OutputFolderPath)
                 ]
 
-                // ---- Generate Button ----
+                // ---- Generate Button (with reset after success) ----
                 + SVerticalBox::Slot()
                 .AutoHeight()
                 .Padding(10)
@@ -474,22 +479,29 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
                                 UE_LOG(LogTemp, Log, TEXT("Name: %s, Folder: %s"), *NameStr, *FolderStr);
                                 UE_LOG(LogTemp, Log, TEXT("Events - Pre: %d, Receive: %d, Post: %d"), bPre, bReceive, bPost);
 
-                                // Call generation function
-                                if (SelectedMeshAsset->IsValid() && !NameStr.IsEmpty() && !FolderStr.IsEmpty())
-                                {
-                                    UStaticMesh* Mesh = Cast<UStaticMesh>(SelectedMeshAsset->GetAsset());
-                                    GenerateInteractableBlueprint(NameStr, FolderStr, Mesh, bPre, bReceive, bPost);
-                                }
-                                else
+                                // Validate required fields
+                                if (!SelectedMeshAsset->IsValid() || NameStr.IsEmpty() || FolderStr.IsEmpty())
                                 {
                                     UE_LOG(LogTemp, Warning, TEXT("Missing required fields: Mesh, Name, or Folder."));
-                                    // Show a notification for missing fields
                                     FNotificationInfo Info(FText::FromString(TEXT("Please fill in all required fields (Mesh, Name, Folder).")));
                                     Info.ExpireDuration = 3.0f;
                                     Info.bUseSuccessFailIcons = true;
                                     TSharedPtr<SNotificationItem> NotificationItem = FSlateNotificationManager::Get().AddNotification(Info);
                                     NotificationItem->SetCompletionState(SNotificationItem::CS_Fail);
+                                    return FReply::Handled();
                                 }
+
+                                UStaticMesh* Mesh = Cast<UStaticMesh>(SelectedMeshAsset->GetAsset());
+                                GenerateInteractableBlueprint(NameStr, FolderStr, Mesh, bPre, bReceive, bPost);
+
+                                // Reset form to defaults after successful generation
+                                *SelectedMeshAsset = FAssetData();                  // Clear mesh selection
+                                *AssetName = TEXT("NewInteractable");               // Reset name
+                                *bPreInteract = false;
+                                *bReceiveInteract = true;                           // Default checked
+                                *bPostInteract = false;
+                                // Optionally keep the output folder as is, or uncomment next line to reset it too:
+                                // *OutputFolderPath = TEXT("/Game");
 
                                 return FReply::Handled();
                             })
