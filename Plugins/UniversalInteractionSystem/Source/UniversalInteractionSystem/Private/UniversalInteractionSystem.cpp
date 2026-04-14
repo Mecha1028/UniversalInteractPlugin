@@ -38,6 +38,14 @@ static const FName UniversalInteractionSystemTabName("UniversalInteractionSystem
 
 #define LOCTEXT_NAMESPACE "FUniversalInteractionSystemModule"
 
+// Forward declaration
+void GenerateInteractableBlueprint(
+    const FString& AssetName,
+    const FString& PackagePath,
+    UStaticMesh* SelectedMesh,
+    TSharedRef<TMap<FName, TSharedRef<bool>>> FunctionCheckStates,
+    const FString& ParentBlueprintName);
+
 // Helper function to create a Content Browser folder picker widget
 TSharedRef<SWidget> CreateContentBrowserFolderPicker(TSharedRef<FString> OutputFolderPath)
 {
@@ -60,10 +68,8 @@ void GenerateInteractableBlueprint(
     const FString& AssetName,
     const FString& PackagePath,
     UStaticMesh* SelectedMesh,
-    bool bPreInteract,
-    bool bReceiveInteract,
-    bool bPostInteract,
-    const FString& InParentClassPath)
+    TSharedRef<TMap<FName, TSharedRef<bool>>> FunctionCheckStates,
+    const FString& ParentBlueprintName)
 {
     // Helper lambda for notifications
     auto ShowNotification = [](const FString& Message, bool bSuccess = true)
@@ -79,20 +85,18 @@ void GenerateInteractableBlueprint(
     UE_LOG(LogTemp, Log, TEXT("AssetName: %s"), *AssetName);
     UE_LOG(LogTemp, Log, TEXT("PackagePath: %s"), *PackagePath);
     UE_LOG(LogTemp, Log, TEXT("Mesh: %s"), SelectedMesh ? *SelectedMesh->GetName() : TEXT("None"));
+    UE_LOG(LogTemp, Log, TEXT("ParentBlueprintName: %s"), *ParentBlueprintName);
 
-    // ------------------------------------------------------------------------
-    // 1. Load base Blueprint using the Asset Registry (most reliable method)
-    // ------------------------------------------------------------------------
+    // 1. Load the parent Blueprint using Asset Registry
     FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
     IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
-
     TArray<FAssetData> AssetList;
     AssetRegistry.GetAssetsByPath(FName("/UniversalInteractionSystem"), AssetList, true);
 
     UBlueprint* BaseBP = nullptr;
     for (const FAssetData& Asset : AssetList)
     {
-        if (Asset.AssetName == FName("UIS_BPP_InteractActor"))
+        if (Asset.AssetName == FName(*ParentBlueprintName))
         {
             BaseBP = Cast<UBlueprint>(Asset.GetAsset());
             break;
@@ -101,24 +105,22 @@ void GenerateInteractableBlueprint(
 
     if (!BaseBP)
     {
-        UE_LOG(LogTemp, Error, TEXT("FAILED: Could not find UIS_BPP_InteractActor in plugin folder"));
-        ShowNotification(TEXT("Base Blueprint 'UIS_BPP_InteractActor' not found in plugin content."), false);
+        UE_LOG(LogTemp, Error, TEXT("FAILED: Could not find parent blueprint '%s' in plugin content"), *ParentBlueprintName);
+        ShowNotification(FString::Printf(TEXT("Parent blueprint '%s' not found"), *ParentBlueprintName), false);
         return;
     }
-    UE_LOG(LogTemp, Log, TEXT("Loaded base blueprint: %s"), *BaseBP->GetName());
+    UE_LOG(LogTemp, Log, TEXT("Loaded parent blueprint: %s"), *BaseBP->GetName());
 
     UClass* ParentClass = BaseBP->GeneratedClass;
     if (!ParentClass)
     {
-        UE_LOG(LogTemp, Error, TEXT("FAILED: Base blueprint has no GeneratedClass"));
-        ShowNotification(TEXT("Base blueprint has no GeneratedClass"), false);
+        UE_LOG(LogTemp, Error, TEXT("FAILED: Parent blueprint has no GeneratedClass"));
+        ShowNotification(TEXT("Parent blueprint has no GeneratedClass"), false);
         return;
     }
     UE_LOG(LogTemp, Log, TEXT("Parent class: %s"), *ParentClass->GetName());
 
-    // ------------------------------------------------------------------------
     // 2. Validate package path
-    // ------------------------------------------------------------------------
     if (PackagePath.IsEmpty())
     {
         UE_LOG(LogTemp, Error, TEXT("FAILED: Output folder path is empty"));
@@ -126,9 +128,7 @@ void GenerateInteractableBlueprint(
         return;
     }
 
-    // ------------------------------------------------------------------------
     // 3. Create package
-    // ------------------------------------------------------------------------
     FString FullPackagePath = PackagePath + TEXT("/") + AssetName;
     UE_LOG(LogTemp, Log, TEXT("Creating package at: %s"), *FullPackagePath);
     UPackage* Package = CreatePackage(*FullPackagePath);
@@ -139,9 +139,7 @@ void GenerateInteractableBlueprint(
         return;
     }
 
-    // ------------------------------------------------------------------------
     // 4. Create the Blueprint asset using BlueprintFactory
-    // ------------------------------------------------------------------------
     UBlueprintFactory* Factory = NewObject<UBlueprintFactory>();
     Factory->ParentClass = ParentClass;
 
@@ -157,9 +155,7 @@ void GenerateInteractableBlueprint(
     }
     UE_LOG(LogTemp, Log, TEXT("Blueprint asset created successfully"));
 
-    // ------------------------------------------------------------------------
     // 5. Add Static Mesh Component to SimpleConstructionScript
-    // ------------------------------------------------------------------------
     if (SelectedMesh)
     {
         UE_LOG(LogTemp, Log, TEXT("Adding StaticMeshComponent with mesh: %s"), *SelectedMesh->GetName());
@@ -190,9 +186,7 @@ void GenerateInteractableBlueprint(
         UE_LOG(LogTemp, Log, TEXT("No mesh selected, skipping StaticMeshComponent"));
     }
 
-    // ------------------------------------------------------------------------
     // 6. Load interface class using Asset Registry and implement it
-    // ------------------------------------------------------------------------
     UClass* InterfaceClass = nullptr;
     for (const FAssetData& Asset : AssetList)
     {
@@ -209,22 +203,36 @@ void GenerateInteractableBlueprint(
         UE_LOG(LogTemp, Log, TEXT("Loaded interface: %s"), *InterfaceClass->GetName());
         if (!NewBP->GeneratedClass->ImplementsInterface(InterfaceClass))
         {
-            FBlueprintEditorUtils::ImplementNewInterface(NewBP, InterfaceClass->GetFName());
+            FBlueprintEditorUtils::ImplementNewInterface(NewBP, FTopLevelAssetPath(InterfaceClass));
             UE_LOG(LogTemp, Log, TEXT("Interface implemented"));
         }
 
-        // 7. Add event nodes to the event graph
-        if (bPreInteract || bReceiveInteract || bPostInteract)
+        // 7. Add event nodes for each checked function
+        bool bAnyChecked = false;
+        for (const auto& Pair : *FunctionCheckStates)
+        {
+            if (*Pair.Value)
+            {
+                bAnyChecked = true;
+                break;
+            }
+        }
+
+        if (bAnyChecked)
         {
             UEdGraph* EventGraph = FBlueprintEditorUtils::FindEventGraph(NewBP);
             if (EventGraph)
             {
                 UE_LOG(LogTemp, Log, TEXT("Found event graph, adding event nodes..."));
                 int32 NodePosY = 200;
-                auto AddEventNode = [&](const FName& FunctionName)
+                for (const auto& Pair : *FunctionCheckStates)
+                {
+                    if (*Pair.Value)
                     {
+                        FName FunctionName = Pair.Key;
                         UFunction* Func = InterfaceClass->FindFunctionByName(FunctionName);
-                        if (!Func) return;
+                        if (!Func) continue;
+
                         UK2Node_Event* EventNode = FKismetEditorUtilities::AddDefaultEventNode(
                             NewBP, EventGraph, FunctionName, InterfaceClass, NodePosY);
                         if (EventNode)
@@ -233,10 +241,8 @@ void GenerateInteractableBlueprint(
                             NodePosY += 150;
                             UE_LOG(LogTemp, Log, TEXT("  Added event node: %s"), *FunctionName.ToString());
                         }
-                    };
-                if (bPreInteract) AddEventNode(TEXT("PreInteract"));
-                if (bReceiveInteract) AddEventNode(TEXT("ReceiveInteract"));
-                if (bPostInteract) AddEventNode(TEXT("PostInteract"));
+                    }
+                }
             }
             else
             {
@@ -250,9 +256,7 @@ void GenerateInteractableBlueprint(
         ShowNotification(TEXT("Failed to load interface - event nodes not added"), false);
     }
 
-    // ------------------------------------------------------------------------
-    // 8. Compile and save the Blueprint
-    // ------------------------------------------------------------------------
+    // 8. Compile and save
     UE_LOG(LogTemp, Log, TEXT("Compiling blueprint..."));
     FKismetEditorUtilities::CompileBlueprint(NewBP);
 
@@ -278,8 +282,6 @@ void GenerateInteractableBlueprint(
 
 void FUniversalInteractionSystemModule::StartupModule()
 {
-    // This code will execute after your module is loaded into memory; the exact timing is specified in the .uplugin file per-module
-
     FUniversalInteractionSystemStyle::Initialize();
     FUniversalInteractionSystemStyle::ReloadTextures();
 
@@ -301,17 +303,10 @@ void FUniversalInteractionSystemModule::StartupModule()
 
 void FUniversalInteractionSystemModule::ShutdownModule()
 {
-    // This function may be called during shutdown to clean up your module.  For modules that support dynamic reloading,
-    // we call this function before unloading the module.
-
     UToolMenus::UnRegisterStartupCallback(this);
-
     UToolMenus::UnregisterOwner(this);
-
     FUniversalInteractionSystemStyle::Shutdown();
-
     FUniversalInteractionSystemCommands::Unregister();
-
     FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(UniversalInteractionSystemTabName);
 }
 
@@ -322,28 +317,132 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
     {
         FString DisplayName;
         FString ParentBlueprintName;
+        // Legacy default bools (still used for quick lookup in ApplyTemplateDefaults)
         bool bDefaultPre;
         bool bDefaultReceive;
         bool bDefaultPost;
     };
 
     TSharedRef<TArray<TSharedPtr<FInteractableTemplate>>> TemplateOptions = MakeShared<TArray<TSharedPtr<FInteractableTemplate>>>();
-    TemplateOptions->Add(MakeShared<FInteractableTemplate>(FInteractableTemplate{ TEXT("Custom"), TEXT("UIS_BPP_InteractActor"), false, true, false }));
+    TemplateOptions->Add(MakeShared<FInteractableTemplate>(FInteractableTemplate{ TEXT("Custom"), TEXT("UIS_BPP_InteractActor"), false, false, false }));
     TemplateOptions->Add(MakeShared<FInteractableTemplate>(FInteractableTemplate{ TEXT("Door"), TEXT("UIS_BPC_Door"), true, true, false }));
-    TemplateOptions->Add(MakeShared<FInteractableTemplate>(FInteractableTemplate{ TEXT("NPC Dialogue"), TEXT("UIS_BPC_Dialogue"), false, true, true }));
+    TemplateOptions->Add(MakeShared<FInteractableTemplate>(FInteractableTemplate{ TEXT("Dialogue"), TEXT("UIS_BPC_Dialogue"), false, true, true }));
 
     // ----- Persistent State Storage -----
     TSharedRef<TSharedPtr<FInteractableTemplate>> SelectedTemplate = MakeShared<TSharedPtr<FInteractableTemplate>>((*TemplateOptions)[0]);
-    TSharedRef<FString> ParentClassPath = MakeShared<FString>();
-    *ParentClassPath = FString::Printf(TEXT("/UniversalInteractionSystem/%s.%s_C"), *(*SelectedTemplate)->ParentBlueprintName, *(*SelectedTemplate)->ParentBlueprintName);
 
-    TSharedRef<bool> bPreInteract = MakeShared<bool>((*SelectedTemplate)->bDefaultPre);
-    TSharedRef<bool> bReceiveInteract = MakeShared<bool>((*SelectedTemplate)->bDefaultReceive);
-    TSharedRef<bool> bPostInteract = MakeShared<bool>((*SelectedTemplate)->bDefaultPost);
+    // Map from function name to its checked state
+    TSharedRef<TMap<FName, TSharedRef<bool>>> FunctionCheckStates = MakeShared<TMap<FName, TSharedRef<bool>>>();
 
     TSharedRef<FAssetData> SelectedMeshAsset = MakeShared<FAssetData>();
     TSharedRef<FString> OutputFolderPath = MakeShared<FString>(TEXT("/Game"));
     TSharedRef<FString> AssetName = MakeShared<FString>(TEXT("NewInteractable"));
+
+    // ----- Load interface and discover functions -----
+    UClass* InterfaceClass = nullptr;
+    TArray<FName> InterfaceFunctionNames;
+
+    {
+        FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+        IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+        TArray<FAssetData> AssetList;
+        AssetRegistry.GetAssetsByPath(FName("/UniversalInteractionSystem"), AssetList, true);
+        for (const FAssetData& Asset : AssetList)
+        {
+            if (Asset.AssetName == FName("UIS_BPI_InteractInterface"))
+            {
+                FString ClassPath = Asset.GetObjectPathString() + TEXT("_C");
+                InterfaceClass = LoadObject<UClass>(nullptr, *ClassPath);
+                break;
+            }
+        }
+
+        if (InterfaceClass)
+        {
+            for (TFieldIterator<UFunction> FuncIt(InterfaceClass); FuncIt; ++FuncIt)
+            {
+                UFunction* Func = *FuncIt;
+                FName FuncName = Func->GetFName();
+                // Skip the internal ExecuteUbergraph function
+                if (FuncName.ToString().Contains(TEXT("ExecuteUbergraph")))
+                {
+                    continue;
+                }
+                if (Func->HasAnyFunctionFlags(FUNC_BlueprintEvent) && !Func->HasAnyFunctionFlags(FUNC_Delegate))
+                {
+                    InterfaceFunctionNames.Add(FuncName);
+                }
+            }
+        }
+    }
+
+    // Initialize check states (all false initially)
+    for (const FName& FuncName : InterfaceFunctionNames)
+    {
+        FunctionCheckStates->Add(FuncName, MakeShared<bool>(false));
+    }
+
+    // Helper to apply template defaults based on template display name
+    auto ApplyTemplateDefaults = [FunctionCheckStates, InterfaceFunctionNames](TSharedPtr<FInteractableTemplate> Template)
+        {
+            // Reset all to false
+            for (const FName& FuncName : InterfaceFunctionNames)
+            {
+                *(*FunctionCheckStates)[FuncName] = false;
+            }
+
+            if (!Template.IsValid())
+            {
+                return;
+            }
+
+            FString TemplateName = Template->DisplayName;
+            if (TemplateName == TEXT("Custom"))
+            {
+                // All false (already done)
+            }
+            else if (TemplateName == TEXT("Door"))
+            {
+                if (auto* Ptr = FunctionCheckStates->Find(FName("PreInteract")))
+                    *(*Ptr) = true;
+                if (auto* Ptr = FunctionCheckStates->Find(FName("ReceiveInteract")))
+                    *(*Ptr) = true;
+            }
+            else if (TemplateName == TEXT("Dialogue"))
+            {
+                if (auto* Ptr = FunctionCheckStates->Find(FName("ReceiveInteract")))
+                    *(*Ptr) = true;
+                if (auto* Ptr = FunctionCheckStates->Find(FName("PostInteract")))
+                    *(*Ptr) = true;
+            }
+        };
+
+    // Apply initial template defaults
+    ApplyTemplateDefaults(*SelectedTemplate);
+
+    // Build the checkbox container widget dynamically
+    TSharedRef<SVerticalBox> CheckboxContainer = SNew(SVerticalBox);
+    for (const FName& FuncName : InterfaceFunctionNames)
+    {
+        TSharedRef<bool> CheckState = (*FunctionCheckStates)[FuncName];
+        CheckboxContainer->AddSlot()
+            .AutoHeight()
+            .Padding(2)
+            [
+                SNew(SCheckBox)
+                    .IsChecked_Lambda([CheckState]() -> ECheckBoxState
+                        {
+                            return *CheckState ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+                        })
+                    .OnCheckStateChanged_Lambda([CheckState](ECheckBoxState NewState)
+                        {
+                            *CheckState = (NewState == ECheckBoxState::Checked);
+                        })
+                    [
+                        SNew(STextBlock).Text(FText::FromName(FuncName))
+                    ]
+            ];
+    }
 
     return SNew(SDockTab)
         .TabRole(ETabRole::NomadTab)
@@ -369,15 +468,13 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
                             {
                                 return SNew(STextBlock).Text(FText::FromString(Item->DisplayName));
                             })
-                        .OnSelectionChanged_Lambda([SelectedTemplate, bPreInteract, bReceiveInteract, bPostInteract, ParentClassPath](TSharedPtr<FInteractableTemplate> NewSelection, ESelectInfo::Type)
+                        .OnSelectionChanged_Lambda([SelectedTemplate, ApplyTemplateDefaults](TSharedPtr<FInteractableTemplate> NewSelection, ESelectInfo::Type)
                             {
                                 if (NewSelection.IsValid())
                                 {
                                     *SelectedTemplate = NewSelection;
-                                    *bPreInteract = NewSelection->bDefaultPre;
-                                    *bReceiveInteract = NewSelection->bDefaultReceive;
-                                    *bPostInteract = NewSelection->bDefaultPost;
-                                    *ParentClassPath = FString::Printf(TEXT("/UniversalInteractionSystem/%s.%s_C"), *NewSelection->ParentBlueprintName, *NewSelection->ParentBlueprintName);
+                                    ApplyTemplateDefaults(NewSelection);
+                                    UE_LOG(LogTemp, Log, TEXT("Template changed to: %s"), *NewSelection->DisplayName);
                                 }
                             })
                         [
@@ -389,7 +486,7 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
                         ]
                 ]
 
-            // ---- Static Mesh Picker (with proper display) ----
+            // ---- Static Mesh Picker ----
             + SVerticalBox::Slot()
                 .AutoHeight()
                 .Padding(5)
@@ -445,65 +542,16 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
                         .Text(FText::FromString(TEXT("Include Interface Events:")))
                 ]
 
-                // ---- PreInteract Checkbox ----
+                // ---- Dynamic Checkboxes Container ----
                 + SVerticalBox::Slot()
                 .AutoHeight()
                 .Padding(5, 0, 5, 0)
                 [
-                    SNew(SCheckBox)
-                        .IsChecked_Lambda([bPreInteract]() -> ECheckBoxState
-                            {
-                                return *bPreInteract ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
-                            })
-                        .OnCheckStateChanged_Lambda([bPreInteract](ECheckBoxState NewState)
-                            {
-                                *bPreInteract = (NewState == ECheckBoxState::Checked);
-                            })
-                        [
-                            SNew(STextBlock).Text(FText::FromString(TEXT("PreInteract")))
-                        ]
+                    CheckboxContainer
                 ]
 
-            // ---- ReceiveInteract Checkbox ----
-            + SVerticalBox::Slot()
-                .AutoHeight()
-                .Padding(5, 0, 5, 0)
-                [
-                    SNew(SCheckBox)
-                        .IsChecked_Lambda([bReceiveInteract]() -> ECheckBoxState
-                            {
-                                return *bReceiveInteract ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
-                            })
-                        .OnCheckStateChanged_Lambda([bReceiveInteract](ECheckBoxState NewState)
-                            {
-                                *bReceiveInteract = (NewState == ECheckBoxState::Checked);
-                            })
-                        [
-                            SNew(STextBlock).Text(FText::FromString(TEXT("ReceiveInteract")))
-                        ]
-                ]
-
-            // ---- PostInteract Checkbox ----
-            + SVerticalBox::Slot()
-                .AutoHeight()
-                .Padding(5, 0, 5, 0)
-                [
-                    SNew(SCheckBox)
-                        .IsChecked_Lambda([bPostInteract]() -> ECheckBoxState
-                            {
-                                return *bPostInteract ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
-                            })
-                        .OnCheckStateChanged_Lambda([bPostInteract](ECheckBoxState NewState)
-                            {
-                                *bPostInteract = (NewState == ECheckBoxState::Checked);
-                            })
-                        [
-                            SNew(STextBlock).Text(FText::FromString(TEXT("PostInteract")))
-                        ]
-                ]
-
-            // ---- Output Folder Picker (Content Browser Style) ----
-            + SVerticalBox::Slot()
+                // ---- Output Folder Picker (with scrolling) ----
+                + SVerticalBox::Slot()
                 .AutoHeight()
                 .Padding(5)
                 [
@@ -511,13 +559,13 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
                         .Text(FText::FromString(TEXT("Output Folder:")))
                 ]
                 + SVerticalBox::Slot()
-                .AutoHeight()
+                .FillHeight(1.0f)
                 .Padding(5)
                 [
                     CreateContentBrowserFolderPicker(OutputFolderPath)
                 ]
 
-                // ---- Generate Button (with reset after success) ----
+                // ---- Generate Button ----
                 + SVerticalBox::Slot()
                 .AutoHeight()
                 .Padding(10)
@@ -525,21 +573,16 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
                 [
                     SNew(SButton)
                         .Text(FText::FromString(TEXT("Generate Blueprint")))
-                        .OnClicked_Lambda([SelectedMeshAsset, AssetName, bPreInteract, bReceiveInteract, bPostInteract, OutputFolderPath, ParentClassPath, SelectedTemplate, TemplateOptions]() -> FReply
+                        .OnClicked_Lambda([SelectedMeshAsset, AssetName, OutputFolderPath, FunctionCheckStates, SelectedTemplate, TemplateOptions]() -> FReply
                             {
                                 FString NameStr = *AssetName;
                                 FString FolderStr = *OutputFolderPath;
-                                bool bPre = *bPreInteract;
-                                bool bReceive = *bReceiveInteract;
-                                bool bPost = *bPostInteract;
 
                                 UE_LOG(LogTemp, Log, TEXT("=== Generate Blueprint Clicked ==="));
                                 UE_LOG(LogTemp, Log, TEXT("Template: %s"), *(*SelectedTemplate)->DisplayName);
-                                UE_LOG(LogTemp, Log, TEXT("ParentClassPath: %s"), *(*ParentClassPath));
+                                UE_LOG(LogTemp, Log, TEXT("ParentBlueprintName: %s"), *(*SelectedTemplate)->ParentBlueprintName);
                                 UE_LOG(LogTemp, Log, TEXT("Name: %s, Folder: %s"), *NameStr, *FolderStr);
-                                UE_LOG(LogTemp, Log, TEXT("Events - Pre: %d, Receive: %d, Post: %d"), bPre, bReceive, bPost);
 
-                                // Validate required fields
                                 if (!SelectedMeshAsset->IsValid() || NameStr.IsEmpty() || FolderStr.IsEmpty())
                                 {
                                     UE_LOG(LogTemp, Warning, TEXT("Missing required fields: Mesh, Name, or Folder."));
@@ -552,16 +595,20 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
                                 }
 
                                 UStaticMesh* Mesh = Cast<UStaticMesh>(SelectedMeshAsset->GetAsset());
-                                GenerateInteractableBlueprint(NameStr, FolderStr, Mesh, bPre, bReceive, bPost, *ParentClassPath);
+                                GenerateInteractableBlueprint(NameStr, FolderStr, Mesh, FunctionCheckStates, (*SelectedTemplate)->ParentBlueprintName);
 
-                                // Reset form to defaults (but keep selected template? We'll reset to Custom)
-                                *SelectedTemplate = (*TemplateOptions)[0]; // Custom
-                                *ParentClassPath = FString::Printf(TEXT("/UniversalInteractionSystem/%s.%s_C"), *(*SelectedTemplate)->ParentBlueprintName, *(*SelectedTemplate)->ParentBlueprintName);
+                                // Reset to Custom template
+                                *SelectedTemplate = (*TemplateOptions)[0];
                                 *SelectedMeshAsset = FAssetData();
                                 *AssetName = TEXT("NewInteractable");
-                                *bPreInteract = (*SelectedTemplate)->bDefaultPre;
-                                *bReceiveInteract = (*SelectedTemplate)->bDefaultReceive;
-                                *bPostInteract = (*SelectedTemplate)->bDefaultPost;
+
+                                // Reset checkboxes (we must re-apply the Custom defaults)
+                                // Since we don't have ApplyTemplateDefaults captured here, we can just manually reset
+                                // or we can capture a reset delegate. Simpler: reset all to false (Custom default).
+                                for (auto& Pair : *FunctionCheckStates)
+                                {
+                                    *Pair.Value = false;
+                                }
 
                                 return FReply::Handled();
                             })
@@ -576,7 +623,6 @@ void FUniversalInteractionSystemModule::PluginButtonClicked()
 
 void FUniversalInteractionSystemModule::RegisterMenus()
 {
-    // Owner will be used for cleanup in call to UToolMenus::UnregisterOwner
     FToolMenuOwnerScoped OwnerScoped(this);
 
     {
