@@ -62,7 +62,8 @@ void GenerateInteractableBlueprint(
     UStaticMesh* SelectedMesh,
     bool bPreInteract,
     bool bReceiveInteract,
-    bool bPostInteract)
+    bool bPostInteract,
+    const FString& InParentClassPath)
 {
     // Helper lambda for notifications
     auto ShowNotification = [](const FString& Message, bool bSuccess = true)
@@ -316,10 +317,29 @@ void FUniversalInteractionSystemModule::ShutdownModule()
 
 TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const FSpawnTabArgs& SpawnTabArgs)
 {
+    // ----- Template Definitions -----
+    struct FInteractableTemplate
+    {
+        FString DisplayName;
+        FString ParentBlueprintName;
+        bool bDefaultPre;
+        bool bDefaultReceive;
+        bool bDefaultPost;
+    };
+
+    TSharedRef<TArray<TSharedPtr<FInteractableTemplate>>> TemplateOptions = MakeShared<TArray<TSharedPtr<FInteractableTemplate>>>();
+    TemplateOptions->Add(MakeShared<FInteractableTemplate>(FInteractableTemplate{ TEXT("Custom"), TEXT("UIS_BPP_InteractActor"), false, true, false }));
+    TemplateOptions->Add(MakeShared<FInteractableTemplate>(FInteractableTemplate{ TEXT("Door"), TEXT("UIS_BPC_Door"), true, true, false }));
+    TemplateOptions->Add(MakeShared<FInteractableTemplate>(FInteractableTemplate{ TEXT("NPC Dialogue"), TEXT("UIS_BPC_Dialogue"), false, true, true }));
+
     // ----- Persistent State Storage -----
-    TSharedRef<bool> bPreInteract = MakeShared<bool>(false);
-    TSharedRef<bool> bReceiveInteract = MakeShared<bool>(true);
-    TSharedRef<bool> bPostInteract = MakeShared<bool>(false);
+    TSharedRef<TSharedPtr<FInteractableTemplate>> SelectedTemplate = MakeShared<TSharedPtr<FInteractableTemplate>>((*TemplateOptions)[0]);
+    TSharedRef<FString> ParentClassPath = MakeShared<FString>();
+    *ParentClassPath = FString::Printf(TEXT("/UniversalInteractionSystem/%s.%s_C"), *(*SelectedTemplate)->ParentBlueprintName, *(*SelectedTemplate)->ParentBlueprintName);
+
+    TSharedRef<bool> bPreInteract = MakeShared<bool>((*SelectedTemplate)->bDefaultPre);
+    TSharedRef<bool> bReceiveInteract = MakeShared<bool>((*SelectedTemplate)->bDefaultReceive);
+    TSharedRef<bool> bPostInteract = MakeShared<bool>((*SelectedTemplate)->bDefaultPost);
 
     TSharedRef<FAssetData> SelectedMeshAsset = MakeShared<FAssetData>();
     TSharedRef<FString> OutputFolderPath = MakeShared<FString>(TEXT("/Game"));
@@ -330,8 +350,47 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
         [
             SNew(SVerticalBox)
 
-                // ---- Static Mesh Picker (with proper display) ----
+                // ---- Template Selector ----
                 + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(5)
+                [
+                    SNew(STextBlock)
+                        .Text(FText::FromString(TEXT("Template:")))
+                ]
+                + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(5)
+                [
+                    SNew(SComboBox<TSharedPtr<FInteractableTemplate>>)
+                        .OptionsSource(&TemplateOptions.Get())
+                        .InitiallySelectedItem(*SelectedTemplate)
+                        .OnGenerateWidget_Lambda([](TSharedPtr<FInteractableTemplate> Item)
+                            {
+                                return SNew(STextBlock).Text(FText::FromString(Item->DisplayName));
+                            })
+                        .OnSelectionChanged_Lambda([SelectedTemplate, bPreInteract, bReceiveInteract, bPostInteract, ParentClassPath](TSharedPtr<FInteractableTemplate> NewSelection, ESelectInfo::Type)
+                            {
+                                if (NewSelection.IsValid())
+                                {
+                                    *SelectedTemplate = NewSelection;
+                                    *bPreInteract = NewSelection->bDefaultPre;
+                                    *bReceiveInteract = NewSelection->bDefaultReceive;
+                                    *bPostInteract = NewSelection->bDefaultPost;
+                                    *ParentClassPath = FString::Printf(TEXT("/UniversalInteractionSystem/%s.%s_C"), *NewSelection->ParentBlueprintName, *NewSelection->ParentBlueprintName);
+                                }
+                            })
+                        [
+                            SNew(STextBlock)
+                                .Text_Lambda([SelectedTemplate]() -> FText
+                                    {
+                                        return (*SelectedTemplate).IsValid() ? FText::FromString((*SelectedTemplate)->DisplayName) : FText::GetEmpty();
+                                    })
+                        ]
+                ]
+
+            // ---- Static Mesh Picker (with proper display) ----
+            + SVerticalBox::Slot()
                 .AutoHeight()
                 .Padding(5)
                 [
@@ -346,7 +405,6 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
                         .AllowedClass(UStaticMesh::StaticClass())
                         .ObjectPath_Lambda([SelectedMeshAsset]() -> FString
                             {
-                                // Return the object path so the widget shows the asset name and icon
                                 return SelectedMeshAsset->IsValid() ? SelectedMeshAsset->GetObjectPathString() : FString();
                             })
                         .OnObjectChanged_Lambda([SelectedMeshAsset](const FAssetData& AssetData)
@@ -467,7 +525,7 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
                 [
                     SNew(SButton)
                         .Text(FText::FromString(TEXT("Generate Blueprint")))
-                        .OnClicked_Lambda([SelectedMeshAsset, AssetName, bPreInteract, bReceiveInteract, bPostInteract, OutputFolderPath]() -> FReply
+                        .OnClicked_Lambda([SelectedMeshAsset, AssetName, bPreInteract, bReceiveInteract, bPostInteract, OutputFolderPath, ParentClassPath, SelectedTemplate, TemplateOptions]() -> FReply
                             {
                                 FString NameStr = *AssetName;
                                 FString FolderStr = *OutputFolderPath;
@@ -476,6 +534,8 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
                                 bool bPost = *bPostInteract;
 
                                 UE_LOG(LogTemp, Log, TEXT("=== Generate Blueprint Clicked ==="));
+                                UE_LOG(LogTemp, Log, TEXT("Template: %s"), *(*SelectedTemplate)->DisplayName);
+                                UE_LOG(LogTemp, Log, TEXT("ParentClassPath: %s"), *(*ParentClassPath));
                                 UE_LOG(LogTemp, Log, TEXT("Name: %s, Folder: %s"), *NameStr, *FolderStr);
                                 UE_LOG(LogTemp, Log, TEXT("Events - Pre: %d, Receive: %d, Post: %d"), bPre, bReceive, bPost);
 
@@ -492,16 +552,16 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
                                 }
 
                                 UStaticMesh* Mesh = Cast<UStaticMesh>(SelectedMeshAsset->GetAsset());
-                                GenerateInteractableBlueprint(NameStr, FolderStr, Mesh, bPre, bReceive, bPost);
+                                GenerateInteractableBlueprint(NameStr, FolderStr, Mesh, bPre, bReceive, bPost, *ParentClassPath);
 
-                                // Reset form to defaults after successful generation
-                                *SelectedMeshAsset = FAssetData();                  // Clear mesh selection
-                                *AssetName = TEXT("NewInteractable");               // Reset name
-                                *bPreInteract = false;
-                                *bReceiveInteract = true;                           // Default checked
-                                *bPostInteract = false;
-                                // Optionally keep the output folder as is, or uncomment next line to reset it too:
-                                // *OutputFolderPath = TEXT("/Game");
+                                // Reset form to defaults (but keep selected template? We'll reset to Custom)
+                                *SelectedTemplate = (*TemplateOptions)[0]; // Custom
+                                *ParentClassPath = FString::Printf(TEXT("/UniversalInteractionSystem/%s.%s_C"), *(*SelectedTemplate)->ParentBlueprintName, *(*SelectedTemplate)->ParentBlueprintName);
+                                *SelectedMeshAsset = FAssetData();
+                                *AssetName = TEXT("NewInteractable");
+                                *bPreInteract = (*SelectedTemplate)->bDefaultPre;
+                                *bReceiveInteract = (*SelectedTemplate)->bDefaultReceive;
+                                *bPostInteract = (*SelectedTemplate)->bDefaultPost;
 
                                 return FReply::Handled();
                             })
