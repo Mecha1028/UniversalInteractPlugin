@@ -638,7 +638,9 @@ void FUniversalInteractionSystemModule::RegisterMenus()
         {
             FToolMenuSection& Section = ToolbarMenu->FindOrAddSection("PluginTools");
             {
-                FToolMenuEntry& Entry = Section.AddEntry(FToolMenuEntry::InitToolBarButton(FUniversalInteractionSystemCommands::Get().OpenPluginWindow));
+                FToolMenuEntry& Entry = Section.AddEntry(FToolMenuEntry::InitToolBarButton(FUniversalInteractionSystemCommands::Get().OpenPluginWindow,
+                    FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Settings")
+                ));
                 Entry.SetCommandList(PluginCommands);
             }
         }

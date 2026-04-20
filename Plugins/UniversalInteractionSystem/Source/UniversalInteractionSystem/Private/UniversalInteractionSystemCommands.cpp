@@ -6,7 +6,7 @@
 
 void FUniversalInteractionSystemCommands::RegisterCommands()
 {
-	UI_COMMAND(OpenPluginWindow, "UniversalInteractionSystem", "Bring up UniversalInteractionSystem window", EUserInterfaceActionType::Button, FInputChord());
+	UI_COMMAND(OpenPluginWindow, "UniversalInteractionSystem", "Create Interact Blueprint", EUserInterfaceActionType::Button, FInputChord());
 }
 
 #undef LOCTEXT_NAMESPACE

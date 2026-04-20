@@ -41,8 +41,6 @@ TSharedRef< FSlateStyleSet > FUniversalInteractionSystemStyle::Create()
 	TSharedRef< FSlateStyleSet > Style = MakeShareable(new FSlateStyleSet("UniversalInteractionSystemStyle"));
 	Style->SetContentRoot(IPluginManager::Get().FindPlugin("UniversalInteractionSystem")->GetBaseDir() / TEXT("Resources"));
 
-	Style->Set("UniversalInteractionSystem.OpenPluginWindow", new IMAGE_BRUSH_SVG(TEXT("PlaceholderButtonIcon"), Icon20x20));
-
 	return Style;
 }
 

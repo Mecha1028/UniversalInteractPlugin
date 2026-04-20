@@ -9,10 +9,14 @@ class FUniversalInteractionSystemCommands : public TCommands<FUniversalInteracti
 {
 public:
 
-	FUniversalInteractionSystemCommands()
-		: TCommands<FUniversalInteractionSystemCommands>(TEXT("UniversalInteractionSystem"), NSLOCTEXT("Contexts", "UniversalInteractionSystem", "UniversalInteractionSystem Plugin"), NAME_None, FUniversalInteractionSystemStyle::GetStyleSetName())
-	{
-	}
+    FUniversalInteractionSystemCommands()
+        : TCommands<FUniversalInteractionSystemCommands>(
+            TEXT("UniversalInteractionSystem"),
+            NSLOCTEXT("Contexts", "UniversalInteractionSystem", "UniversalInteractionSystem Plugin"),
+            NAME_None,
+            FUniversalInteractionSystemStyle::GetStyleSetName())
+    {
+    }
 
 	// TCommands<> interface
 	virtual void RegisterCommands() override;
