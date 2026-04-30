@@ -276,6 +276,7 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
     {
         FString DisplayName;
         FString ParentBlueprintName;
+        FName MeshComponentName = NAME_None;
         TMap<FName, bool> FunctionDefaults;
     };
 
@@ -284,12 +285,14 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
     TemplateOptions->Add(MakeShared<FInteractableTemplate>(FInteractableTemplate{
         TEXT("Custom"),
         TEXT("UIS_BPP_InteractActor"),
+        NAME_None,
         TMap<FName, bool> {}
 	}));
 
     TemplateOptions->Add(MakeShared<FInteractableTemplate>(FInteractableTemplate{
         TEXT("Press Button"),
         TEXT("UIS_BPC_PressButton"),
+        NAME_None,
         TMap<FName, bool> {
             {FName("PreInteract"), true},
             {FName("ReceiveInteract"), true},
@@ -300,12 +303,14 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
     TemplateOptions->Add(MakeShared<FInteractableTemplate>(FInteractableTemplate{
         TEXT("Stand Button - Template Not Implemented"),
         TEXT("UIS_BPC_StandButton"),
+        NAME_None,
         TMap<FName, bool> {}
     }));
 
     TemplateOptions->Add(MakeShared<FInteractableTemplate>(FInteractableTemplate{
         TEXT("Door"),
         TEXT("UIS_BPC_Door"),
+        NAME_None,
         TMap<FName, bool> {
             {FName("ReceiveInteract"), true}
         }
@@ -389,6 +394,67 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
 
     ApplyTemplateDefaults(*SelectedTemplate);
 
+    auto TryPopulateDefaultMesh = [SelectedMeshAsset](TSharedPtr<FInteractableTemplate> NewTemplate)
+        {
+            if (!NewTemplate.IsValid())
+            {
+                return;
+            }
+
+            // Load Parent Blueprint and check validity
+            FString BPAssetPath = FString::Printf(TEXT("/UniversalInteractionSystem/%s.%s"),
+                *NewTemplate->ParentBlueprintName,
+                *NewTemplate->ParentBlueprintName);
+            UBlueprint* ParentBP = LoadObject<UBlueprint>(nullptr, *BPAssetPath);
+            if (!ParentBP || !ParentBP->GeneratedClass)
+            {
+                return;
+            }
+
+            UObject* CDO = ParentBP->GeneratedClass->GetDefaultObject();
+            if (!CDO)
+            {
+                return;
+            }
+            AActor* ActorCDO = Cast<AActor>(CDO);
+            if (!ActorCDO)
+            {
+                return;
+            }
+
+            // Find the StaticMeshComponent
+            UStaticMeshComponent* FoundSMC = nullptr;
+            if (!NewTemplate->MeshComponentName.IsNone())
+            {
+                for (UActorComponent* Comp : ActorCDO->GetComponents())
+                {
+                    if (Comp->GetFName() == NewTemplate->MeshComponentName)
+                    {
+                        FoundSMC = Cast<UStaticMeshComponent>(Comp);
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                for (UActorComponent* Comp : ActorCDO->GetComponents())
+                {
+                    UStaticMeshComponent* SMC = Cast<UStaticMeshComponent>(Comp);
+                    if (SMC && SMC->GetStaticMesh())
+                    {
+                        FoundSMC = SMC;
+                        break;
+                    }
+                }
+            }
+
+            // Set the shared asset data
+            if (FoundSMC && FoundSMC->GetStaticMesh())
+            {
+                *SelectedMeshAsset = FAssetData(FoundSMC->GetStaticMesh());
+            }
+        };
+
     // Generate checkbox per function in the interface if new functions are added later by user or developer
     TSharedRef<SVerticalBox> CheckboxContainer = SNew(SVerticalBox);
     for (const FName& FuncName : InterfaceFunctionNames)
@@ -437,12 +503,13 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
                             {
                                 return SNew(STextBlock).Text(FText::FromString(Item->DisplayName));
                             })
-                        .OnSelectionChanged_Lambda([SelectedTemplate, ApplyTemplateDefaults](TSharedPtr<FInteractableTemplate> NewSelection, ESelectInfo::Type)
+                        .OnSelectionChanged_Lambda([SelectedTemplate, ApplyTemplateDefaults, TryPopulateDefaultMesh](TSharedPtr<FInteractableTemplate> NewSelection, ESelectInfo::Type)
                             {
                                 if (NewSelection.IsValid())
                                 {
                                     *SelectedTemplate = NewSelection;
                                     ApplyTemplateDefaults(NewSelection);
+                                    TryPopulateDefaultMesh(NewSelection);
                                 }
                             })
                         [
@@ -559,7 +626,7 @@ TSharedRef<SDockTab> FUniversalInteractionSystemModule::OnSpawnPluginTab(const F
                                 UStaticMesh* Mesh = Cast<UStaticMesh>(SelectedMeshAsset->GetAsset());
                                 GenerateInteractableBlueprint(NameStr, FolderStr, Mesh, FunctionCheckStates, (*SelectedTemplate)->ParentBlueprintName);
 
-                                // Reset UI to default if user creates multiple blueprints at once
+                                // Reset UI to default so user can create multiple blueprints
                                 *SelectedTemplate = (*TemplateOptions)[0];
                                 *SelectedMeshAsset = FAssetData();
                                 *AssetName = TEXT("NewInteractable");
